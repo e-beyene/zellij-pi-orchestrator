@@ -423,47 +423,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("zj", {
-		description: "Low-level command: /zj <action> ... (kept for backward compatibility)",
-		handler: async (args, ctx) => {
-			const raw = (args || "").trim();
-			if (!raw) {
-				ctx.ui.notify("Usage: /zj <action> ...", "info");
-				return;
-			}
-			const t = splitArgs(raw);
-			const action = t[0] as Params["action"];
-			let params: Params | null = null;
-
-			if (action === "init") params = { action, session: t[1] };
-			else if (action === "spawn") {
-				params = { action, session: t[1], subagentId: t[2] };
-				for (let i = 3; i < t.length; i++) {
-					if (t[i] === "--cwd") params.cwd = t[++i];
-					else if (t[i] === "--cmd") params.command = t[++i];
-				}
-			} else if (action === "assign") params = { action, session: t[1], target: t[2], taskId: t[3], promptFile: t[4] };
-			else if (action === "wait") {
-				params = { action, session: t[1], target: t[2] ?? "all", timeoutSec: Number(t[3] ?? 120) };
-				for (let i = 4; i < t.length; i++) if (t[i] === "--grace") params.graceSec = Number(t[++i] ?? 10);
-			} else if (action === "collect") params = { action, session: t[1], json: !t.includes("--no-json") };
-			else if (action === "status") params = { action, session: t[1] };
-			else if (action === "terminate") params = { action, session: t[1], target: t[2] ?? "all" };
-			else if (action === "demo") params = { action, session: t[1] };
-
-			if (!params || !params.session) {
-				ctx.ui.notify("Invalid command arguments", "error");
-				return;
-			}
-
-			try {
-				await executeAndNotify(params, ctx.cwd, (msg, level) => ctx.ui.notify(msg, level));
-			} catch (e: any) {
-				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
-			}
-		},
-	});
-
 	pi.registerCommand("zj-help", {
 		description: "Show friendly zellij-orchestrator command examples",
 		handler: async (_args, ctx) => {

@@ -4,7 +4,7 @@ Run and coordinate multiple Pi subagents in parallel using Zellij panes.
 
 This repo provides a **Pi extension** (`zellij-orchestrator`) that adds:
 - Tool: `zellij_orchestrate`
-- Command: `/zj`
+- Friendly commands: `/zj-start`, `/zj-task`, `/zj-run`, `/zj-wait`, `/zj-results`, `/zj-stop`, `/zj-help`
 
 Use it when you want a parent Pi workflow to split work across multiple subagents, then collect structured handoffs.
 
@@ -78,10 +78,10 @@ Use `--cmd` only if you want to override default behavior.
 - `OUTPUT_FILE`
 - `TASK_ID`
 
-Example override:
+Example override (via tool call):
 
 ```text
-/zj spawn demo worker-a --cmd "pi -p \"$(cat \"$PROMPT_FILE\")\" > \"$OUTPUT_FILE\""
+Use zellij_orchestrate with action="spawn", session="demo", subagentId="worker-a", command="pi -p \"$(cat \"$PROMPT_FILE\")\" > \"$OUTPUT_FILE\""
 ```
 
 ---
@@ -115,9 +115,6 @@ Friendly commands:
 - `/zj-wait <session> [worker|all] [timeoutSec] [--grace N]`
 - `/zj-results <session>`
 - `/zj-stop <session>`
-
-Low-level command (backward compatible):
-- `/zj <action> ...`
 
 You can also call tool `zellij_orchestrate` directly.
 
