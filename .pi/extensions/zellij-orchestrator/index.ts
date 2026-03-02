@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -102,12 +103,14 @@ function parseJsonFile(file: string): any | null {
 	}
 }
 
+const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
+
 function resolveWorkerPath(cwd: string): string {
 	const candidates = [
 		process.env.PI_ZELLIJ_WORKER_PATH,
+		path.join(EXTENSION_DIR, "bin", "subagent-worker.mjs"),
+		path.join(cwd, ".pi", "extensions", "zellij-orchestrator", "bin", "subagent-worker.mjs"),
 		path.join(cwd, "bin", "subagent-worker.mjs"),
-		path.join(cwd, "zellij-pi-orchestrator", "bin", "subagent-worker.mjs"),
-		"/private/tmp/zellij-pi-orchestrator/bin/subagent-worker.mjs",
 	].filter(Boolean) as string[];
 
 	for (const candidate of candidates) {

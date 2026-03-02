@@ -5,7 +5,7 @@ This extension now contains the orchestration control plane directly in TypeScri
 ## Files
 
 - `index.ts` — extension entrypoint + orchestration logic
-- `../../../bin/subagent-worker.mjs` — Node worker runtime run inside Zellij panes
+- `bin/subagent-worker.mjs` — Node worker runtime run inside Zellij panes
 
 ## What changed
 
@@ -28,6 +28,6 @@ This extension now contains the orchestration control plane directly in TypeScri
 
 The extension resolves `subagent-worker.mjs` in this order:
 1. `PI_ZELLIJ_WORKER_PATH`
-2. `<cwd>/bin/subagent-worker.mjs`
-3. `<cwd>/zellij-pi-orchestrator/bin/subagent-worker.mjs`
-4. `/private/tmp/zellij-pi-orchestrator/bin/subagent-worker.mjs`
+2. `<extension_dir>/bin/subagent-worker.mjs`
+3. `<cwd>/.pi/extensions/zellij-orchestrator/bin/subagent-worker.mjs`
+4. `<cwd>/bin/subagent-worker.mjs`

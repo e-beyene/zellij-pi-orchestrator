@@ -5,7 +5,7 @@ Implements `@plan.md` with an extension-native control plane.
 ## Current architecture
 
 - **Pi extension control plane**: `.pi/extensions/zellij-orchestrator/index.ts`
-- **Worker runtime**: `bin/subagent-worker.mjs` (runs in each Zellij pane)
+- **Worker runtime**: `.pi/extensions/zellij-orchestrator/bin/subagent-worker.mjs` (runs in each Zellij pane)
 - **No shell orchestrator required**
 
 ## Requirements
