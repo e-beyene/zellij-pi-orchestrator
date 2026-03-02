@@ -41,6 +41,12 @@ type Params = {
 	json?: boolean;
 };
 
+type CollectItem = {
+	subagent_id: string;
+	status: string;
+	handoff: unknown;
+};
+
 function truncate(text: string, max = 12000): string {
 	if (text.length <= max) return text;
 	return `${text.slice(0, max)}\n...[truncated ${text.length - max} chars]`;
@@ -50,31 +56,83 @@ function normalizePath(p: string): string {
 	return p.startsWith("@") ? p.slice(1) : p;
 }
 
-function resolveScriptPath(cwd: string): string {
+function splitArgs(raw: string): string[] {
+	const tokens = raw.match(/"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\S+/g) ?? [];
+	return tokens.map((t) => {
+		if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) return t.slice(1, -1);
+		return t;
+	});
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getOrchRoot(cwd: string): string {
+	return process.env.PI_ZELLIJ_ORCH_ROOT || path.join(cwd, ".orchestrator");
+}
+
+function sessionDir(orchRoot: string, session: string): string {
+	return path.join(orchRoot, session);
+}
+
+function subagentsDir(orchRoot: string, session: string): string {
+	return path.join(sessionDir(orchRoot, session), "subagents");
+}
+
+function subagentDir(orchRoot: string, session: string, id: string): string {
+	return path.join(subagentsDir(orchRoot, session), id);
+}
+
+function readText(file: string): string | null {
+	try {
+		return fs.readFileSync(file, "utf8");
+	} catch {
+		return null;
+	}
+}
+
+function parseJsonFile(file: string): any | null {
+	const raw = readText(file);
+	if (!raw) return null;
+	try {
+		return JSON.parse(raw);
+	} catch {
+		return { parse_error: true, raw: raw.slice(0, 1000) };
+	}
+}
+
+function resolveWorkerPath(cwd: string): string {
 	const candidates = [
-		process.env.PI_ZELLIJ_ORCH_SCRIPT,
-		path.join(cwd, "bin", "orchestrator.sh"),
-		path.join(cwd, "zellij-pi-orchestrator", "bin", "orchestrator.sh"),
-		"/private/tmp/zellij-pi-orchestrator/bin/orchestrator.sh",
+		process.env.PI_ZELLIJ_WORKER_PATH,
+		path.join(cwd, "bin", "subagent-worker.mjs"),
+		path.join(cwd, "zellij-pi-orchestrator", "bin", "subagent-worker.mjs"),
+		"/private/tmp/zellij-pi-orchestrator/bin/subagent-worker.mjs",
 	].filter(Boolean) as string[];
 
 	for (const candidate of candidates) {
 		if (fs.existsSync(candidate)) return candidate;
 	}
-
-	throw new Error(
-		`Could not locate orchestrator.sh. Set PI_ZELLIJ_ORCH_SCRIPT or place it at <cwd>/bin/orchestrator.sh. Tried: ${candidates.join(", ")}`,
-	);
+	throw new Error(`Could not locate subagent-worker.mjs. Tried: ${candidates.join(", ")}`);
 }
 
-function splitArgs(raw: string): string[] {
-	const tokens = raw.match(/"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\S+/g) ?? [];
-	return tokens.map((t) => {
-		if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
-			return t.slice(1, -1);
-		}
-		return t;
-	});
+async function zellij(pi: ExtensionAPI, args: string[], signal?: AbortSignal) {
+	return pi.exec("zellij", args, { signal, timeout: 120000 });
+}
+
+function listSubagentIds(orchRoot: string, session: string): string[] {
+	const dir = subagentsDir(orchRoot, session);
+	if (!fs.existsSync(dir)) return [];
+	return fs
+		.readdirSync(dir, { withFileTypes: true })
+		.filter((d) => d.isDirectory())
+		.map((d) => d.name)
+		.sort();
+}
+
+function resolveTargets(orchRoot: string, session: string, target?: string): string[] {
+	if (!target || target === "all") return listSubagentIds(orchRoot, session);
+	return [target];
 }
 
 export default function (pi: ExtensionAPI) {
@@ -92,9 +150,7 @@ export default function (pi: ExtensionAPI) {
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
 				const sessions = (entry.data as any)?.sessions;
-				if (Array.isArray(sessions)) {
-					for (const s of sessions) if (typeof s === "string") managedSessions.add(s);
-				}
+				if (Array.isArray(sessions)) for (const s of sessions) if (typeof s === "string") managedSessions.add(s);
 			}
 		}
 		if (managedSessions.size > 0) {
@@ -102,96 +158,235 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	const terminateAll = async (session: string) => {
+		await zellij(pi, ["kill-session", session]);
+		managedSessions.delete(session);
+		persistState();
+	};
+
+	pi.on("session_shutdown", async (_event, _ctx) => {
 		for (const session of managedSessions) {
 			try {
-				const script = resolveScriptPath(ctx.cwd);
-				await pi.exec(script, ["terminate", session, "all"]);
+				await zellij(pi, ["kill-session", session]);
 			} catch {
-				// best-effort cleanup
+				// best effort
 			}
 		}
-		ctx.ui.setStatus("zellij-orch", undefined);
 	});
 
-	const run = async (params: Params, cwd: string, signal?: AbortSignal) => {
-		const script = resolveScriptPath(cwd);
-		const args: string[] = [];
-		let tempPromptFile: string | undefined;
+	const ensureSession = async (orchRoot: string, session: string) => {
+		fs.mkdirSync(subagentsDir(orchRoot, session), { recursive: true });
+		await zellij(pi, ["attach", "--create-background", session]);
+		fs.writeFileSync(path.join(sessionDir(orchRoot, session), "session.env"), `SESSION_NAME=${session}\nORCH_ROOT=${orchRoot}\n`, "utf8");
+	};
+
+	const collect = (orchRoot: string, session: string): CollectItem[] => {
+		const ids = listSubagentIds(orchRoot, session);
+		return ids.map((id) => {
+			const sd = subagentDir(orchRoot, session, id);
+			const status = (readText(path.join(sd, "status")) || "unknown").trim() || "unknown";
+			const handoff = parseJsonFile(path.join(sd, "handoff.json"));
+			return { subagent_id: id, status, handoff };
+		});
+	};
+
+	const isComplete = (item: CollectItem) => {
+		const handoff = item.handoff as any;
+		return item.status === "idle" && handoff && handoff.agent_end === true;
+	};
+
+	const runAction = async (params: Params, cwd: string, signal?: AbortSignal) => {
+		const orchRoot = getOrchRoot(cwd);
+		fs.mkdirSync(orchRoot, { recursive: true });
 
 		switch (params.action) {
-			case "init":
-				args.push("init", params.session);
+			case "init": {
+				await ensureSession(orchRoot, params.session);
 				managedSessions.add(params.session);
 				persistState();
-				break;
+				return { status: "ok", text: `initialized session=${params.session}`, details: { orchRoot } };
+			}
 			case "spawn": {
 				if (!params.subagentId) throw new Error("subagentId is required for spawn");
-				args.push("spawn", params.session, params.subagentId);
-				if (params.cwd) args.push("--cwd", normalizePath(params.cwd));
-				if (params.command) args.push("--cmd", params.command);
+				await ensureSession(orchRoot, params.session);
 				managedSessions.add(params.session);
 				persistState();
-				break;
+
+				const sd = subagentDir(orchRoot, params.session, params.subagentId);
+				for (const d of ["inbox", "done", "prompts", "logs"]) fs.mkdirSync(path.join(sd, d), { recursive: true });
+
+				const workerPath = resolveWorkerPath(cwd);
+				const spawnCwd = params.cwd ? normalizePath(params.cwd) : cwd;
+				const envArgs = [
+					`ORCH_ROOT=${orchRoot}`,
+					`SESSION_NAME=${params.session}`,
+					`SUBAGENT_ID=${params.subagentId}`,
+				];
+				if (params.command) envArgs.push(`PI_SUBAGENT_CMD=${params.command}`);
+
+				const res = await zellij(
+					pi,
+					[
+						"--session",
+						params.session,
+						"run",
+						"--name",
+						`agent:${params.subagentId}`,
+						"--cwd",
+						spawnCwd,
+						"--",
+						"env",
+						...envArgs,
+						process.execPath,
+						workerPath,
+					],
+					signal,
+				);
+				if (res.code !== 0) throw new Error(res.stderr || res.stdout || "zellij spawn failed");
+				return {
+					status: "ok",
+					text: `spawned subagent=${params.subagentId} session=${params.session}`,
+					details: { orchRoot, workerPath, stdout: res.stdout, stderr: res.stderr },
+				};
 			}
 			case "assign": {
-				const target = params.target ?? "all";
 				if (!params.taskId) throw new Error("taskId is required for assign");
-				let promptFile = params.promptFile;
-				if (!promptFile && params.promptText) {
-					tempPromptFile = path.join(os.tmpdir(), `pi-zellij-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
-					fs.writeFileSync(tempPromptFile, params.promptText, "utf8");
-					promptFile = tempPromptFile;
+				let prompt = "";
+				if (params.promptText) prompt = params.promptText;
+				else if (params.promptFile) {
+					const p = normalizePath(params.promptFile);
+					if (!fs.existsSync(p)) throw new Error(`prompt file not found: ${p}`);
+					prompt = fs.readFileSync(p, "utf8");
+				} else {
+					throw new Error("promptFile or promptText is required for assign");
 				}
-				if (!promptFile) throw new Error("promptFile or promptText is required for assign");
-				args.push("assign", params.session, target, params.taskId, normalizePath(promptFile));
-				break;
+
+				const targets = resolveTargets(orchRoot, params.session, params.target);
+				let assigned = 0;
+				for (const id of targets) {
+					const sd = subagentDir(orchRoot, params.session, id);
+					if (!fs.existsSync(sd)) continue;
+					fs.mkdirSync(path.join(sd, "prompts"), { recursive: true });
+					fs.mkdirSync(path.join(sd, "inbox"), { recursive: true });
+					fs.writeFileSync(path.join(sd, "prompts", `${params.taskId}.md`), prompt, "utf8");
+					fs.writeFileSync(
+						path.join(sd, "inbox", `${params.taskId}.task`),
+						`task_id=${params.taskId}\ncreated_at=${new Date().toISOString()}\n`,
+						"utf8",
+					);
+					assigned++;
+				}
+				if (assigned === 0) throw new Error("no subagents assigned");
+				return { status: "ok", text: `assigned task=${params.taskId} to ${assigned} subagent(s)`, details: { assigned } };
 			}
-			case "wait":
-				args.push("wait", params.session, params.target ?? "all", String(params.timeoutSec ?? 120));
-				if (params.graceSec !== undefined) args.push("--grace", String(params.graceSec));
-				break;
-			case "collect":
-				args.push("collect", params.session);
-				if (params.json !== false) args.push("--json");
-				break;
-			case "status":
-				args.push("status", params.session);
-				break;
-			case "terminate":
-				args.push("terminate", params.session, params.target ?? "all");
-				if ((params.target ?? "all") === "all") {
-					managedSessions.delete(params.session);
-					persistState();
+			case "collect": {
+				const items = collect(orchRoot, params.session);
+				if (params.json === false) {
+					const lines = items.map((i) => `${i.subagent_id}: status=${i.status} handoff=${i.handoff ? "present" : "missing"}`);
+					return { status: "ok", text: lines.join("\n") || "no subagents", details: { items } };
 				}
-				break;
-			case "demo":
-				args.push("demo", params.session);
+				return { status: "ok", text: JSON.stringify(items, null, 2), details: { items } };
+			}
+			case "status": {
+				const items = collect(orchRoot, params.session);
+				const done = items.filter(isComplete).length;
+				return { status: "ok", text: `session=${params.session} complete=${done}/${items.length}`, details: { items } };
+			}
+			case "wait": {
+				const timeoutSec = params.timeoutSec ?? 120;
+				const graceSec = params.graceSec ?? 10;
+				const target = params.target ?? "all";
+				const started = Date.now();
+
+				while (true) {
+					const items = collect(orchRoot, params.session).filter((i) => target === "all" || i.subagent_id === target);
+					const done = items.length > 0 && items.every(isComplete);
+					if (done) {
+						return {
+							status: "ok",
+							text: `all targeted subagents completed (${items.length})`,
+							details: { items, timeout: false },
+						};
+					}
+
+					if ((Date.now() - started) / 1000 >= timeoutSec) {
+						const targets = resolveTargets(orchRoot, params.session, target);
+						for (const id of targets) {
+							const sd = subagentDir(orchRoot, params.session, id);
+							if (!fs.existsSync(sd)) continue;
+							fs.mkdirSync(path.join(sd, "prompts"), { recursive: true });
+							fs.mkdirSync(path.join(sd, "inbox"), { recursive: true });
+							fs.writeFileSync(
+								path.join(sd, "prompts", "_force_wrapup.md"),
+								"Wrap up now. Return a concise handoff immediately.\n",
+								"utf8",
+							);
+							fs.writeFileSync(
+								path.join(sd, "inbox", "_force_wrapup.task"),
+								`task_id=_force_wrapup\ncreated_at=${new Date().toISOString()}\n`,
+								"utf8",
+							);
+						}
+
+						await sleep(graceSec * 1000);
+						if (target === "all") await terminateAll(params.session);
+						else {
+							const sd = subagentDir(orchRoot, params.session, target);
+							fs.mkdirSync(sd, { recursive: true });
+							fs.writeFileSync(path.join(sd, "status"), "failed:force-terminated\n", "utf8");
+						}
+
+						return {
+							status: "error",
+							text: `timeout reached (${timeoutSec}s), force-terminated target=${target}`,
+							details: { timeout: true, target },
+						};
+					}
+
+					await sleep(1000);
+				}
+			}
+			case "terminate": {
+				const target = params.target ?? "all";
+				if (target === "all") {
+					await terminateAll(params.session);
+					return { status: "ok", text: `terminated session=${params.session}`, details: {} };
+				}
+				const sd = subagentDir(orchRoot, params.session, target);
+				fs.mkdirSync(sd, { recursive: true });
+				fs.writeFileSync(path.join(sd, "status"), "failed:force-terminated\n", "utf8");
+				return { status: "ok", text: `marked subagent=${target} as force-terminated`, details: {} };
+			}
+			case "demo": {
+				await ensureSession(orchRoot, params.session);
 				managedSessions.add(params.session);
 				persistState();
-				break;
-		}
-
-		try {
-			const result = await pi.exec(script, args, { signal, timeout: 300000 });
-			const stdout = result.stdout ?? "";
-			const stderr = result.stderr ?? "";
-			let parsed: unknown;
-			if (params.action === "collect" && (params.json ?? true)) {
-				try {
-					parsed = JSON.parse(stdout);
-				} catch {
-					parsed = undefined;
-				}
-			}
-			return { script, args, code: result.code, stdout, stderr, parsed };
-		} finally {
-			if (tempPromptFile) {
-				try {
-					fs.unlinkSync(tempPromptFile);
-				} catch {
-					// ignore temp cleanup errors
-				}
+				await runAction({ action: "spawn", session: params.session, subagentId: "worker-a" }, cwd, signal);
+				await runAction({ action: "spawn", session: params.session, subagentId: "worker-b" }, cwd, signal);
+				await runAction(
+					{
+						action: "assign",
+						session: params.session,
+						target: "worker-a",
+						taskId: "task-001",
+						promptText: "Research 3 ways to make shell orchestration robust. Return concise bullet points.",
+					},
+					cwd,
+					signal,
+				);
+				await runAction(
+					{
+						action: "assign",
+						session: params.session,
+						target: "worker-b",
+						taskId: "task-002",
+						promptText: "Summarize why a handoff.json file is useful for multi-agent workflows.",
+					},
+					cwd,
+					signal,
+				);
+				await runAction({ action: "wait", session: params.session, target: "all", timeoutSec: 25, graceSec: 3 }, cwd, signal);
+				return runAction({ action: "collect", session: params.session, json: true }, cwd, signal);
 			}
 		}
 	};
@@ -200,44 +395,58 @@ export default function (pi: ExtensionAPI) {
 		name: "zellij_orchestrate",
 		label: "Zellij Orchestrate",
 		description:
-			"Control Zellij-based Pi subagents: init/spawn/assign/wait/collect/terminate. Use collect(json=true) after wait.",
+			"Control Zellij-based Pi subagents: init/spawn/assign/wait/collect/terminate. Extension-native control plane.",
 		parameters: ParamsSchema,
 		async execute(_toolCallId, params: Params, signal, _onUpdate, ctx) {
-			const out = await run(params, ctx.cwd, signal);
-			const cmd = `${out.script} ${out.args.join(" ")}`;
-			const status = out.code === 0 ? "ok" : "error";
-			let text = `[zellij_orchestrate:${status}] ${params.action} session=${params.session}`;
-			if (out.stdout.trim()) text += `\n\nstdout:\n${truncate(out.stdout)}`;
-			if (out.stderr.trim()) text += `\n\nstderr:\n${truncate(out.stderr)}`;
-
-			ctx.ui.setStatus("zellij-orch", `last: ${params.action} (${status})`);
+			const out = await runAction(params, ctx.cwd, signal);
+			ctx.ui.setStatus("zellij-orch", `last: ${params.action} (${out.status})`);
 			return {
-				content: [{ type: "text", text }],
-				details: {
-					command: cmd,
-					exitCode: out.code,
-					stdout: truncate(out.stdout),
-					stderr: truncate(out.stderr),
-					parsed: out.parsed,
-				},
-				isError: out.code !== 0,
+				content: [{ type: "text", text: `[zellij_orchestrate:${out.status}] ${out.text}` }],
+				details: out.details,
+				isError: out.status !== "ok",
 			};
 		},
 	});
 
 	pi.registerCommand("zj", {
-		description: "Run orchestrator command directly, eg: /zj status my-session",
+		description: "Run extension-native orchestrator command (init/spawn/assign/wait/collect/status/terminate/demo)",
 		handler: async (args, ctx) => {
 			const raw = (args || "").trim();
 			if (!raw) {
-				ctx.ui.notify("Usage: /zj <init|spawn|assign|wait|collect|status|terminate|demo> ...", "info");
+				ctx.ui.notify("Usage: /zj <action> ...", "info");
 				return;
 			}
-			const script = resolveScriptPath(ctx.cwd);
-			const tokens = splitArgs(raw);
-			const result = await pi.exec(script, tokens, { timeout: 300000 });
-			if (result.stdout?.trim()) ctx.ui.notify(truncate(result.stdout, 1200), result.code === 0 ? "info" : "error");
-			if (result.stderr?.trim()) ctx.ui.notify(truncate(result.stderr, 1200), "warning");
+			const t = splitArgs(raw);
+			const action = t[0] as Params["action"];
+			let params: Params | null = null;
+
+			if (action === "init") params = { action, session: t[1] };
+			else if (action === "spawn") {
+				params = { action, session: t[1], subagentId: t[2] };
+				for (let i = 3; i < t.length; i++) {
+					if (t[i] === "--cwd") params.cwd = t[++i];
+					else if (t[i] === "--cmd") params.command = t[++i];
+				}
+			} else if (action === "assign") params = { action, session: t[1], target: t[2], taskId: t[3], promptFile: t[4] };
+			else if (action === "wait") {
+				params = { action, session: t[1], target: t[2] ?? "all", timeoutSec: Number(t[3] ?? 120) };
+				for (let i = 4; i < t.length; i++) if (t[i] === "--grace") params.graceSec = Number(t[++i] ?? 10);
+			} else if (action === "collect") params = { action, session: t[1], json: !t.includes("--no-json") };
+			else if (action === "status") params = { action, session: t[1] };
+			else if (action === "terminate") params = { action, session: t[1], target: t[2] ?? "all" };
+			else if (action === "demo") params = { action, session: t[1] };
+
+			if (!params || !params.session) {
+				ctx.ui.notify("Invalid command arguments", "error");
+				return;
+			}
+
+			try {
+				const out = await runAction(params, ctx.cwd);
+				ctx.ui.notify(truncate(out.text, 1200), out.status === "ok" ? "info" : "error");
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
 		},
 	});
 }

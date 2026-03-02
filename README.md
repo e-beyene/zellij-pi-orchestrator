@@ -1,97 +1,60 @@
-# Zellij Pi Subagent Orchestrator (Hybrid: Skill + Extension)
+# Zellij Pi Subagent Orchestrator (Extension-native)
 
-Implements `@plan.md` with a **hybrid path**:
-- shell orchestrator + worker runtime (skill-friendly)
-- project-local Pi extension control plane
+Implements `@plan.md` with an extension-native control plane.
 
-- Spawn subagents in Zellij panes
-- Assign tasks by writing prompt files + inbox task files
-- Collect structured handoffs (`handoff.json`)
-- Wait with timeout + grace + force-terminate behavior
+## Current architecture
+
+- **Pi extension control plane**: `.pi/extensions/zellij-orchestrator/index.ts`
+- **Worker runtime**: `bin/subagent-worker.mjs` (runs in each Zellij pane)
+- **No shell orchestrator required**
 
 ## Requirements
 
-- `zellij` (tested with 0.43.x)
-- `bash`
-- `python3`
+- `zellij`
+- `node`
+- `bash` (only if your `PI_SUBAGENT_CMD` uses it)
 
-## Quick Start
+## Usage (from Pi)
 
-```bash
-cd /private/tmp/zellij-pi-orchestrator
-./bin/orchestrator.sh demo demo-session
+Tool:
+- `zellij_orchestrate`
+
+Command:
+- `/zj <action> ...`
+
+Examples:
+
+```text
+/zj init demo
+/zj spawn demo worker-a
+/zj assign demo worker-a task-001 /absolute/path/to/prompt.md
+/zj wait demo all 120 --grace 10
+/zj collect demo
+/zj terminate demo all
 ```
 
-Then inspect state:
+## Data layout
 
-```bash
-./bin/orchestrator.sh status demo-session
-./bin/orchestrator.sh collect demo-session --json
-```
+`<cwd>/.orchestrator/<session>/subagents/<id>/`
 
-Clean up:
-
-```bash
-./bin/orchestrator.sh terminate demo-session all
-```
-
-## Core Interface
-
-```bash
-./bin/orchestrator.sh init <session>
-./bin/orchestrator.sh spawn <session> <subagent_id> [--cwd <dir>] [--cmd <pi_cmd>]
-./bin/orchestrator.sh assign <session> <subagent_id|all> <task_id> <prompt_file>
-./bin/orchestrator.sh wait <session> <subagent_id|all> <timeout_sec> [--grace <sec>]
-./bin/orchestrator.sh collect <session> [--json]
-./bin/orchestrator.sh terminate <session> [subagent_id|all]
-```
-
-## Real Pi command wiring
-
-By default, workers run in mock mode. To run a real command per task:
-
-```bash
-./bin/orchestrator.sh spawn my-session worker-a \
-  --cmd 'pi run --non-interactive --prompt-file "$PROMPT_FILE" > "$OUTPUT_FILE"'
-```
-
-Worker environment variables available to `--cmd`:
-- `PROMPT_FILE`
-- `OUTPUT_FILE`
-- `TASK_ID`
-
-## Extension-first migration
-
-Project-local extension path:
-
-`/private/tmp/zellij-pi-orchestrator/.pi/extensions/zellij-orchestrator/index.ts`
-
-Capabilities:
-- LLM tool: `zellij_orchestrate`
-- Slash command: `/zj ...`
-- Extension state persistence for managed sessions
-- Best-effort cleanup on `session_shutdown`
-
-See:
-- `/private/tmp/zellij-pi-orchestrator/.pi/extensions/zellij-orchestrator/README.md`
-
-## Data Layout
-
-State root:
-
-`/private/tmp/zellij-pi-orchestrator/.orchestrator/<session>/subagents/<id>/`
-
-Important files:
+Key files:
 - `inbox/<task_id>.task`
 - `prompts/<task_id>.md`
 - `done/<task_id>.out.txt`
 - `status`
 - `handoff.json`
 
-## Notes / Limitations
+## Completion semantics
 
-- Targeted pane kill is version-sensitive in Zellij CLI; session-wide terminate is most reliable.
-- Completion check requires both: `status == idle` and `handoff.json` with `agent_end: true`.
-- Timeout flow: wrap-up steer once, grace period, then force-terminate.
-- Force-terminate does **not** generate a synthetic `handoff.json`.
-- `handoff.json` parsing is best-effort.
+A subagent is complete only when both are true:
+- `status == idle`
+- `handoff.json.agent_end == true`
+
+## Timeout semantics
+
+On timeout:
+1. assign `_force_wrapup`
+2. wait grace period
+3. force-terminate target
+
+If force-terminated, no synthetic handoff is generated.
