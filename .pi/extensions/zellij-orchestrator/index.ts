@@ -23,7 +23,7 @@ const ParamsSchema = Type.Object({
 	timeoutSec: Type.Optional(Type.Number({ description: "Timeout seconds (for wait)" })),
 	graceSec: Type.Optional(Type.Number({ description: "Grace seconds after wrap-up steer" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for spawned pane" })),
-	command: Type.Optional(Type.String({ description: "PI_SUBAGENT_CMD for worker spawn" })),
+	command: Type.Optional(Type.String({ description: "Optional custom worker command; overrides default pi -p execution" })),
 	json: Type.Optional(Type.Boolean({ description: "Use JSON output for collect" })),
 });
 

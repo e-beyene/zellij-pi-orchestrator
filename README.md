@@ -27,7 +27,7 @@ Typical use cases:
 - `node` installed and on `PATH`
 
 Optional:
-- A real subagent command via `--cmd` (otherwise worker runs mock mode)
+- Custom subagent command via `--cmd` (overrides the default Pi execution)
 
 ---
 
@@ -71,20 +71,25 @@ Create two prompt files (or prepare one and reuse), then assign:
 
 ---
 
-## Real subagent execution (instead of mock mode)
+## Default execution + optional override
 
-When spawning, pass a command that consumes:
+By default, workers run real Pi tasks using:
+
+- `pi -p "<prompt text from PROMPT_FILE>"`
+- stdout is written to `done/<task_id>.out.txt`
+
+Use `--cmd` only if you want to override default behavior.
+
+`--cmd` can use these env vars:
 - `PROMPT_FILE`
 - `OUTPUT_FILE`
 - `TASK_ID`
 
-Example:
+Example override:
 
 ```text
 /zj spawn demo worker-a --cmd "pi -p \"$(cat \"$PROMPT_FILE\")\" > \"$OUTPUT_FILE\""
 ```
-
-If no `--cmd` is provided, worker writes mock output for testing.
 
 ---
 

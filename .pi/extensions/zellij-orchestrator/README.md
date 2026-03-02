@@ -17,6 +17,8 @@ This extension now contains the orchestration control plane directly in TypeScri
 
 - LLM tool: `zellij_orchestrate`
 - Command: `/zj ...`
+- Default worker execution runs real `pi -p` tasks
+- Optional `--cmd` override per spawned worker
 - Managed session persistence via `appendEntry`
 - Cleanup on `session_shutdown` (best effort)
 

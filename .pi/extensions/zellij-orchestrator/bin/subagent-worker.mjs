@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 const ORCH_ROOT = process.env.ORCH_ROOT;
 const SESSION_NAME = process.env.SESSION_NAME;
 const SUBAGENT_ID = process.env.SUBAGENT_ID;
-const PI_SUBAGENT_CMD = process.env.PI_SUBAGENT_CMD || "";
+const PI_SUBAGENT_CMD = process.env.PI_SUBAGENT_CMD || ""; // optional override
 const POLL_MS = Number(process.env.SUBAGENT_POLL_INTERVAL_MS || 1000);
 
 if (!ORCH_ROOT || !SESSION_NAME || !SUBAGENT_ID) {
@@ -36,11 +36,12 @@ function listTasks() {
     .map((f) => path.join(inboxDir, f));
 }
 
-async function runCustomCommand(cmd, env) {
+async function runProcess(command, args, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", cmd], {
+    const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, ...env },
+      shell: false,
     });
 
     let stdout = "";
@@ -54,6 +55,20 @@ async function runCustomCommand(cmd, env) {
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
     child.on("error", (err) => resolve({ code: 1, stdout, stderr: String(err) }));
   });
+}
+
+async function runCustomCommand(cmd, env) {
+  return runProcess("bash", ["-lc", cmd], env);
+}
+
+async function runDefaultPi(promptFile) {
+  const prompt = fs.readFileSync(promptFile, "utf8");
+  const text = prompt.trim();
+  if (!text) {
+    return { code: 1, stdout: "", stderr: `Prompt file is empty: ${promptFile}` };
+  }
+  // Default behavior: run real Pi task in print mode.
+  return runProcess("pi", ["-p", text]);
 }
 
 function writeHandoff(payload) {
@@ -83,37 +98,30 @@ async function runTask(taskFile) {
     return;
   }
 
-  if (PI_SUBAGENT_CMD) {
-    const result = await runCustomCommand(PI_SUBAGENT_CMD, {
-      PROMPT_FILE: promptFile,
-      OUTPUT_FILE: outputFile,
-      TASK_ID: taskId,
-    });
-    fs.writeFileSync(logFile, `${result.stdout}${result.stderr}` || `exit_code=${result.code}\n`, "utf8");
-    if (!fs.existsSync(outputFile)) {
-      fs.writeFileSync(outputFile, `${result.stdout}${result.stderr}` || `exit_code=${result.code}\n`, "utf8");
-    }
-  } else {
-    const prompt = fs.readFileSync(promptFile, "utf8");
-    const mock = [
-      `[mock-subagent:${SUBAGENT_ID}]`,
-      `task_id=${taskId}`,
-      "--- prompt ---",
-      prompt.trimEnd(),
-      "--- end prompt ---",
-      "summary=Completed by mock worker. Set PI_SUBAGENT_CMD to run a real Pi command.",
-      "",
-    ].join("\n");
-    fs.writeFileSync(outputFile, mock, "utf8");
-    fs.writeFileSync(logFile, "mock run complete\n", "utf8");
+  const result = PI_SUBAGENT_CMD
+    ? await runCustomCommand(PI_SUBAGENT_CMD, {
+        PROMPT_FILE: promptFile,
+        OUTPUT_FILE: outputFile,
+        TASK_ID: taskId,
+      })
+    : await runDefaultPi(promptFile);
+
+  const combinedLogs = `${result.stdout}${result.stderr}` || `exit_code=${result.code}\n`;
+  fs.writeFileSync(logFile, combinedLogs, "utf8");
+
+  if (!fs.existsSync(outputFile)) {
+    fs.writeFileSync(outputFile, result.stdout || combinedLogs, "utf8");
   }
 
   const outputText = fs.existsSync(outputFile) ? fs.readFileSync(outputFile, "utf8") : "";
   const summary = outputText.split(/\r?\n/).slice(0, 12).join("\n").slice(0, 4000);
+
+  const ok = result.code === 0;
   writeHandoff({
     task_id: taskId,
     subagent_id: SUBAGENT_ID,
-    status: "completed",
+    status: ok ? "completed" : "failed",
+    error: ok ? undefined : `subagent command exit code ${result.code}`,
     summary,
     output_file: outputFile,
     agent_end: true,
