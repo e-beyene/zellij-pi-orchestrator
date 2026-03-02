@@ -33,37 +33,19 @@ Optional:
 
 ## Install / Setup
 
-### Option A: Project-local extension (recommended)
-
-If you cloned this repo, it already contains:
-
-- `.pi/extensions/zellij-orchestrator/index.ts`
-- `.pi/extensions/zellij-orchestrator/bin/subagent-worker.mjs`
-
-From repo root:
-
 ```bash
-cd /path/to/zellij-pi-orchestrator
+git clone git@github.com:e-beyene/zellij-pi-orchestrator.git
+cd zellij-pi-orchestrator
 pi
 ```
 
-Then in Pi run:
+Inside Pi:
 
 ```text
 /reload
 ```
 
-That loads the extension from `.pi/extensions/...`.
-
-### Option B: Install globally for all projects
-
-```bash
-mkdir -p ~/.pi/agent/extensions/zellij-orchestrator/bin
-cp .pi/extensions/zellij-orchestrator/index.ts ~/.pi/agent/extensions/zellij-orchestrator/index.ts
-cp .pi/extensions/zellij-orchestrator/bin/subagent-worker.mjs ~/.pi/agent/extensions/zellij-orchestrator/bin/subagent-worker.mjs
-```
-
-Start Pi anywhere and run `/reload`.
+That’s it. The project-local extension is auto-discovered from `.pi/extensions/zellij-orchestrator/`.
 
 ---
 
