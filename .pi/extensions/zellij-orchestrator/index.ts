@@ -394,6 +394,18 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
+	const executeAndNotify = async (params: Params, cwd: string, notify: (msg: string, level: "info" | "warning" | "error") => void) => {
+		const out = await runAction(params, cwd);
+		notify(truncate(out.text, 1200), out.status === "ok" ? "info" : "error");
+		return out;
+	};
+
+	const parsePromptSource = (raw: string): { promptFile?: string; promptText?: string } => {
+		const candidate = normalizePath(raw);
+		if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return { promptFile: candidate };
+		return { promptText: raw };
+	};
+
 	pi.registerTool({
 		name: "zellij_orchestrate",
 		label: "Zellij Orchestrate",
@@ -412,7 +424,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("zj", {
-		description: "Run extension-native orchestrator command (init/spawn/assign/wait/collect/status/terminate/demo)",
+		description: "Low-level command: /zj <action> ... (kept for backward compatibility)",
 		handler: async (args, ctx) => {
 			const raw = (args || "").trim();
 			if (!raw) {
@@ -445,11 +457,137 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
-				const out = await runAction(params, ctx.cwd);
-				ctx.ui.notify(truncate(out.text, 1200), out.status === "ok" ? "info" : "error");
+				await executeAndNotify(params, ctx.cwd, (msg, level) => ctx.ui.notify(msg, level));
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zj-help", {
+		description: "Show friendly zellij-orchestrator command examples",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(
+				"/zj-start demo worker-a worker-b\n/zj-task demo worker-a t1 @/abs/path/task.md\n/zj-task demo worker-b t2 \"Investigate auth flow\"\n/zj-wait demo all 120\n/zj-results demo\n/zj-stop demo",
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("zj-start", {
+		description: "Initialize session and optionally spawn workers: /zj-start <session> [worker1 worker2 ...]",
+		handler: async (args, ctx) => {
+			const t = splitArgs((args || "").trim());
+			const session = t[0];
+			const workers = t.slice(1);
+			if (!session) {
+				ctx.ui.notify("Usage: /zj-start <session> [worker1 worker2 ...]", "error");
+				return;
+			}
+			try {
+				await executeAndNotify({ action: "init", session }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+				for (const worker of workers) {
+					await executeAndNotify({ action: "spawn", session, subagentId: worker }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+				}
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zj-task", {
+		description: "Assign a task: /zj-task <session> <worker|all> <taskId> <promptFile|promptText>",
+		handler: async (args, ctx) => {
+			const t = splitArgs((args || "").trim());
+			const [session, target, taskId, ...rest] = t;
+			if (!session || !target || !taskId || rest.length === 0) {
+				ctx.ui.notify("Usage: /zj-task <session> <worker|all> <taskId> <promptFile|promptText>", "error");
+				return;
+			}
+			const promptRaw = rest.join(" ");
+			const prompt = parsePromptSource(promptRaw);
+			try {
+				await executeAndNotify({ action: "assign", session, target, taskId, ...prompt }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zj-run", {
+		description: "One-shot run: spawn worker, assign task, wait, collect",
+		handler: async (args, ctx) => {
+			const t = splitArgs((args || "").trim());
+			const [session, worker, ...rest] = t;
+			if (!session || !worker || rest.length === 0) {
+				ctx.ui.notify("Usage: /zj-run <session> <worker> <promptFile|promptText>", "error");
+				return;
+			}
+			const taskId = `task-${Date.now()}`;
+			const prompt = parsePromptSource(rest.join(" "));
+			try {
+				await executeAndNotify({ action: "init", session }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+				await executeAndNotify({ action: "spawn", session, subagentId: worker }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+				await executeAndNotify({ action: "assign", session, target: worker, taskId, ...prompt }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+				await executeAndNotify({ action: "wait", session, target: worker, timeoutSec: 120 }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+				await executeAndNotify({ action: "collect", session, json: true }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zj-wait", {
+		description: "Wait for completion: /zj-wait <session> [worker|all] [timeoutSec] [--grace N]",
+		handler: async (args, ctx) => {
+			const t = splitArgs((args || "").trim());
+			const session = t[0];
+			if (!session) {
+				ctx.ui.notify("Usage: /zj-wait <session> [worker|all] [timeoutSec] [--grace N]", "error");
+				return;
+			}
+			const target = t[1] ?? "all";
+			const timeoutSec = Number(t[2] ?? 120);
+			let graceSec: number | undefined;
+			for (let i = 3; i < t.length; i++) if (t[i] === "--grace") graceSec = Number(t[++i] ?? 10);
+			try {
+				await executeAndNotify({ action: "wait", session, target, timeoutSec, graceSec }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zj-results", {
+		description: "Collect results: /zj-results <session>",
+		handler: async (args, ctx) => {
+			const session = splitArgs((args || "").trim())[0];
+			if (!session) {
+				ctx.ui.notify("Usage: /zj-results <session>", "error");
+				return;
+			}
+			try {
+				await executeAndNotify({ action: "collect", session, json: true }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
+			} catch (e: any) {
+				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zj-stop", {
+		description: "Terminate orchestrator session: /zj-stop <session>",
+		handler: async (args, ctx) => {
+			const session = splitArgs((args || "").trim())[0];
+			if (!session) {
+				ctx.ui.notify("Usage: /zj-stop <session>", "error");
+				return;
+			}
+			try {
+				await executeAndNotify({ action: "terminate", session, target: "all" }, ctx.cwd, (m, l) => ctx.ui.notify(m, l));
 			} catch (e: any) {
 				ctx.ui.notify(truncate(String(e?.message || e), 1200), "error");
 			}
 		},
 	});
 }
+

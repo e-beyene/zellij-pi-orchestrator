@@ -54,19 +54,12 @@ That’s it. The project-local extension is auto-discovered from `.pi/extensions
 Inside Pi:
 
 ```text
-/zj init demo
-/zj spawn demo worker-a
-/zj spawn demo worker-b
-```
-
-Create two prompt files (or prepare one and reuse), then assign:
-
-```text
-/zj assign demo worker-a task-001 /absolute/path/to/task-a.md
-/zj assign demo worker-b task-002 /absolute/path/to/task-b.md
-/zj wait demo all 120 --grace 10
-/zj collect demo
-/zj terminate demo all
+/zj-start demo worker-a worker-b
+/zj-task demo worker-a task-001 @/absolute/path/to/task-a.md
+/zj-task demo worker-b task-002 @/absolute/path/to/task-b.md
+/zj-wait demo all 120 --grace 10
+/zj-results demo
+/zj-stop demo
 ```
 
 ---
@@ -114,17 +107,17 @@ Completion requires **both**:
 
 ## Commands
 
-`/zj <action> ...`
+Friendly commands:
+- `/zj-help`
+- `/zj-start <session> [worker1 worker2 ...]`
+- `/zj-task <session> <worker|all> <taskId> <promptFile|promptText>`
+- `/zj-run <session> <worker> <promptFile|promptText>`
+- `/zj-wait <session> [worker|all] [timeoutSec] [--grace N]`
+- `/zj-results <session>`
+- `/zj-stop <session>`
 
-Actions:
-- `init`
-- `spawn`
-- `assign`
-- `wait`
-- `collect`
-- `status`
-- `terminate`
-- `demo`
+Low-level command (backward compatible):
+- `/zj <action> ...`
 
 You can also call tool `zellij_orchestrate` directly.
 
